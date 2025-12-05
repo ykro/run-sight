@@ -1,0 +1,6 @@
+.env
+test-assets/
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
