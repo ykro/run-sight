@@ -223,8 +223,6 @@ if start_btn:
                     report_content = core.generate_ai_report(
                         [metrics], 
                         system_prompt, 
-                        [metrics], 
-                        system_prompt, 
                         safe_feedback, 
                         api_key=api_key_env
                     )
