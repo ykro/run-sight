@@ -1,0 +1,24 @@
+[project]
+name = "runsight"
+version = "0.1.0"
+description = "Forensic Athletic Analysis CLI and Web App"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fitdecode>=0.10.0",
+    "google-genai",
+    "numpy",
+    "pandas",
+    "plotly",
+    "python-dotenv",
+    "rich",
+    "streamlit",
+    "watchdog",
+    "fpdf2",
+    "matplotlib",
+    "google-cloud-storage",
+    "google-cloud-firestore",
+]
+
+[dependency-groups]
+dev = []

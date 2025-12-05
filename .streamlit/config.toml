@@ -1,0 +1,16 @@
+[client]
+toolbarMode = "viewer"
+showSidebarNavigation = false
+
+[ui]
+hideTopBar = true
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+
+[theme]
+base = "light"
+primaryColor = "#ff4b4b" 
+# keeping streamlit red or maybe something neutral? Default light is fine.
