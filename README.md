@@ -5,6 +5,11 @@ Runsight is a high-performance Python CLI tool designed to perform deep forensic
 ## Features
 
 - **Advanced Fit Parsing:** Extracts high-fidelity raw data from fit files using `fitdecode`.
+
+## Web App Demo
+You can try the hosted version here:
+[Runsight Web App](https://runsight-web-504954692234.us-central1.run.app/)
+
 - **Forensic Metrics Engine:** Calculates specialized metrics not found in standard apps:
   - **Continuity Index:** True moving time vs stop time analysis.
   - **Uphill Biomechanics:** Detects over-striding and mechanical inefficiencies.

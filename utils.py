@@ -273,17 +273,31 @@ def calculate_metrics(df: pd.DataFrame, metadata: Dict) -> Dict:
 
     return metrics
 
-def generate_ai_report(metrics_list: List[Dict], system_prompt: str, feedback: str, consolidate: bool = False, api_key: str = None) -> str:
+def generate_ai_report(metrics_list: List[Dict], system_prompt: str, feedback: str, csv_data: str = None, metadata: Dict = None, consolidate: bool = False, api_key: str = None) -> str:
     """Generates the AI report using Google GenAI."""
-    
+
     client = setup_client(api_key)
     
     if consolidate:
         mode_text = "MODE 2: CONSOLIDATED TREND ANALYSIS"
         data_payload = json.dumps(metrics_list, indent=2)
+        raw_context = "N/A (Consolidated Mode)"
     else:
         mode_text = "MODE 1: INDIVIDUAL REPORT"
         data_payload = json.dumps(metrics_list[0], indent=2)
+        
+        # Format Metadata
+        meta_str = json.dumps(metadata, indent=2, default=str) if metadata else "N/A"
+        
+        # Prepare Raw Data Context (CSV)
+        # We assume csv_data is passed as a string.
+        raw_context = f"""
+    METADATA (DEVICE/SESSION):
+    {meta_str}
+
+    RAW TELEMETRY (CSV SNAPSHOT):
+    {csv_data if csv_data else "N/A"}
+    """
 
     prompt = f"""
     {system_prompt}
@@ -295,6 +309,9 @@ def generate_ai_report(metrics_list: List[Dict], system_prompt: str, feedback: s
     
     DATA PAYLOAD:
     {data_payload}
+
+    === RAW DATA CONTEXT ===
+    {raw_context}
     """
     
     retries = 3
@@ -304,6 +321,8 @@ def generate_ai_report(metrics_list: List[Dict], system_prompt: str, feedback: s
                 model=GEMINI_MODEL,
                 contents=prompt
             )
+            if not response.text:
+                raise AnalysisError("AI returned empty response.")
             return response.text
         except Exception as e:
             error_str = str(e)

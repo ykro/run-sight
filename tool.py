@@ -5,6 +5,7 @@ import sys
 import argparse
 import time
 import json
+import traceback
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -68,6 +69,9 @@ def main():
 
     all_metrics = []
     
+    csv_context = None
+    meta_context = None
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -85,6 +89,16 @@ def main():
                 metrics = core.calculate_metrics(df, metadata)
                 metrics['filename'] = file_path.name
                 
+                # Capture Context (Smart Downsampling for AI)
+                # If df is too large (>2000 rows), we sample it to save tokens while keeping trends.
+                if len(df) > 2000:
+                    step = len(df) // 2000
+                    csv_context = df.iloc[::step, :].to_csv(index=False)
+                else:
+                    csv_context = df.to_csv(index=False)
+
+                meta_context = metadata
+
                 # Save Artifacts
                 save_artifacts(df, metadata, metrics, file_path)
                 
@@ -97,7 +111,8 @@ def main():
                 progress.advance(task)
                 
             except Exception as e:
-                CONSOLE.print(f"[red]Error processing {file_path.name}: {e}[/red]")
+                CONSOLE.print(f"[red]Error processing {file_path.name}: {type(e).__name__}: {e}[/red]")
+                CONSOLE.print(traceback.format_exc())
 
     if not all_metrics:
         CONSOLE.print("[red]No metrics generated.[/red]")
@@ -109,9 +124,14 @@ def main():
             all_metrics, 
             system_prompt, 
             args.feedback, 
+            csv_data=csv_context,
+            metadata=meta_context,
             consolidate=args.consolidate
         )
         
+        if not report:
+            raise ValueError("AI Report generation returned empty content.")
+            
         CONSOLE.print(Panel(Markdown(report), title="Forensic Report", border_style="green"))
         
         # Save Report to MD
@@ -128,7 +148,8 @@ def main():
 
 
     except Exception as e:
-        CONSOLE.print(f"[bold red]AI Reporting Failed:[/bold red] {e}")
+        CONSOLE.print(f"[bold red]AI Reporting Failed:[/bold red] {type(e).__name__}: {e}")
+        CONSOLE.print(traceback.format_exc())
 
 if __name__ == "__main__":
     main()

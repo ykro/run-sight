@@ -164,6 +164,11 @@ if 'df' not in st.session_state:
     st.session_state.df = None
 if 'filename' not in st.session_state:
     st.session_state.filename = ""
+if 'is_processing' not in st.session_state:
+    st.session_state.is_processing = False
+
+def start_processing():
+    st.session_state.is_processing = True
 
 # Title
 st.title("Runsight AI: Performance Analysis")
@@ -178,29 +183,45 @@ with st.container(border=True):
         
         with col1:
             st.markdown("#### Input")
+            # Keys are required for persistent access across reruns
             uploaded_file = st.file_uploader("Upload .fit file", type=['fit'], 
-                                            label_visibility="collapsed")
+                                            label_visibility="collapsed", key='fit_file')
             
         with col2:
             st.markdown("#### Notes (Optional)")
             feedback = st.text_area("Context", height=100, placeholder="e.g. Race Day...",
-                                   label_visibility="collapsed") 
+                                   label_visibility="collapsed", key='feedback_text') 
 
         # Submit Button
+        # Locked whenever processing is active
         if api_key_env:
-            start_btn = st.form_submit_button("Start Analysis", type="primary", disabled=False)
+            st.form_submit_button("Start Analysis", 
+                                  type="primary", 
+                                  disabled=st.session_state.is_processing,
+                                  on_click=start_processing)
         else:
             st.error("API Key missing in environment.")
-            start_btn = False
 
 # --- PROCESSING ---
-if start_btn:
-    if uploaded_file and api_key_env:
+# Triggered by session state, not just the button press
+if st.session_state.is_processing:
+    # Need to retrieve values from session state because we might be in a rerun
+    uploaded_file = st.session_state.get('fit_file')
+    feedback = st.session_state.get('feedback_text', '')
+
+    if uploaded_file:
+        # Clear previous results immediately
+        st.session_state.analysis_done = False
+        st.session_state.report_content = None
+        st.session_state.metrics = None
+        st.session_state.df = None
+        
         # > Validation Checks
         is_valid, msg = validate_fit_file(uploaded_file)
         if not is_valid:
             st.error(f"Invalid File: {msg}")
-            st.stop()
+            st.session_state.is_processing = False
+            st.rerun()
             
         # > Sanitization
         safe_feedback = sanitize_input(feedback)
@@ -220,10 +241,19 @@ if start_btn:
                     
                     # 2. AI Report
                     system_prompt = core.load_system_prompt("analysis.md")
+                    # Smart Downsampling for AI Context
+                    if len(df) > 2000:
+                        step = len(df) // 2000
+                        csv_data_str = df.iloc[::step, :].to_csv(index=False)
+                    else:
+                        csv_data_str = df.to_csv(index=False)
+
                     report_content = core.generate_ai_report(
                         [metrics], 
                         system_prompt, 
                         safe_feedback, 
+                        csv_data=csv_data_str,
+                        metadata=metadata,
                         api_key=api_key_env
                     )
 
@@ -232,7 +262,7 @@ if start_btn:
                     gcs_uri = core.upload_to_gcs(tmp_path, destination_blob_name=uploaded_file.name)
                     if gcs_uri:
                         metrics['gcs_uri'] = gcs_uri
-                        st.toast(f"File backed up to Cloud Storage", icon="☁️")
+                        # Silent upload (User requested removal of toast)
 
                     # Save result to Firestore
                     if core.GCP_PROJECT_ID:
@@ -245,9 +275,8 @@ if start_btn:
                             'report': report_content,
                             'feedback': safe_feedback
                         }
-                        if core.save_to_firestore('reports', doc_id, firestore_data):
-                            st.toast(f"Report saved to Database", icon="💾")
-
+                        core.save_to_firestore('reports', doc_id, firestore_data)
+                        # Silent save (User requested removal of toast)
                     
                     # Update State
                     st.session_state.df = df
@@ -256,14 +285,22 @@ if start_btn:
                     st.session_state.filename = uploaded_file.name
                     st.session_state.analysis_done = True
                     
+                    st.toast("Analysis Completed Successfully!", icon="✅")
+                    
                 finally:
                     if tmp_path.exists():
                         tmp_path.unlink()
-            
+                        
             except Exception as e:
                 st.error(f"Analysis Failed: {e}")
+            finally:
+                # Unlock and reset
+                st.session_state.is_processing = False
+                st.rerun()
     else:
         st.warning("Please upload a file to begin.")
+        st.session_state.is_processing = False
+        st.rerun()
 
 # --- RESULTS DISPLAY ---
 if st.session_state.analysis_done:
