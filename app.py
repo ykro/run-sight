@@ -69,29 +69,55 @@ def sanitize_input(text):
 
 def validate_fit_file(file_obj):
     """
-    Validates if the uploaded file is a valid FIT file containing record data.
+    Validates if the uploaded file is a valid FIT file (or ZIP containing one).
     """
     try:
-        # We need to read the file, so we wrap it or reset pointer
-        from fitdecode import FitReader, FitHeaderError
-        
-        # Streamlit UploadedFile behavior: getvalue() returns bytes
-        # FitReader expects a path or file-like object
-        with io.BytesIO(file_obj.getvalue()) as f:
-            with FitReader(f) as fit:
-                # Iterate briefly to check for data
-                has_records = False
-                for frame in fit:
-                    if frame.frame_type == core.fitdecode.FIT_FRAME_DATA and frame.name == 'record':
-                        has_records = True
-                        break
+        # Check based on extension derived from name (Streamlit UploadedFile has .name)
+        if file_obj.name.lower().endswith('.zip'):
+             import zipfile
+             with zipfile.ZipFile(file_obj) as z:
+                fit_files = [f for f in z.namelist() if f.lower().endswith('.fit')]
+                if not fit_files:
+                    return False, "No .fit file found in the ZIP archive."
                 
-                if not has_records:
-                    return False, "File contains no activity records."
+                # Check the first fit file
+                with z.open(fit_files[0]) as f:
+                    # Read a bit to check header or try parsing logic
+                    # Simple check: Try FitReader on it
+                    from fitdecode import FitReader
+                    with FitReader(f) as fit:
+                         # Iterate briefly to check for data
+                        has_records = False
+                        for frame in fit:
+                            if frame.frame_type == core.fitdecode.FIT_FRAME_DATA and frame.name == 'record':
+                                has_records = True
+                                break
+                        if not has_records:
+                             return False, "File contains no activity records."
+                return True, "Valid ZIP"
+
+        else:
+            # Standard FIT file
+            # We need to read the file, so we wrap it or reset pointer
+            from fitdecode import FitReader
+            
+            # Streamlit UploadedFile behavior: getvalue() returns bytes
+            # FitReader expects a path or file-like object
+            with io.BytesIO(file_obj.getvalue()) as f:
+                with FitReader(f) as fit:
+                    # Iterate briefly to check for data
+                    has_records = False
+                    for frame in fit:
+                        if frame.frame_type == core.fitdecode.FIT_FRAME_DATA and frame.name == 'record':
+                            has_records = True
+                            break
+                    
+                    if not has_records:
+                        return False, "File contains no activity records."
                     
         return True, "Valid"
-    except Exception:
-        return False, "Corrupted or invalid .fit file format."
+    except Exception as e:
+        return False, f"Corrupted or invalid file format: {e}"
 
 def create_enhanced_pdf(text, metrics, df):
     pdf = PDFReport()
@@ -166,6 +192,13 @@ if 'filename' not in st.session_state:
     st.session_state.filename = ""
 if 'is_processing' not in st.session_state:
     st.session_state.is_processing = False
+if 'error_message' not in st.session_state:
+    st.session_state.error_message = None
+
+if st.session_state.error_message:
+    st.error(st.session_state.error_message)
+    st.session_state.error_message = None # Clear after showing
+
 
 def start_processing():
     st.session_state.is_processing = True
@@ -179,25 +212,40 @@ api_key_env = os.getenv("GEMINI_API_KEY")
 # Use a Form to prevent interaction while processing and bundle inputs
 with st.container(border=True):
     with st.form("analysis_form"):
-        col1, col2 = st.columns([3, 1]) 
+        # Determine if inputs should be disabled
+        inputs_disabled = st.session_state.is_processing
+        
+        col1, col2 = st.columns([1, 1]) 
         
         with col1:
-            st.markdown("#### Input")
-            # Keys are required for persistent access across reruns
-            uploaded_file = st.file_uploader("Upload .fit file", type=['fit'], 
-                                            label_visibility="collapsed", key='fit_file')
+            st.markdown("#### File Upload")
+            uploaded_file = st.file_uploader("Upload .fit file", type=['fit', 'zip'], 
+                                            label_visibility="collapsed", key='fit_file',
+                                            disabled=inputs_disabled)
             
-        with col2:
-            st.markdown("#### Notes (Optional)")
-            feedback = st.text_area("Context", height=100, placeholder="e.g. Race Day...",
-                                   label_visibility="collapsed", key='feedback_text') 
+            st.markdown("#### Athlete Profile (Optional)")
+            profile = st.text_input("Profile Type", placeholder="e.g. Elite, Recreational, etc...", 
+                                   key='profile', disabled=inputs_disabled)
+            max_hr = st.number_input("Max HR", min_value=0, max_value=250, value=0, 
+                                    help="Override Max HR for Zone calc", key='max_hr',
+                                    disabled=inputs_disabled)
 
+        with col2:
+            st.markdown("#### Session Context (Optional)")
+            goal = st.text_input("Goal", placeholder="e.g. Base Building, Tempo...", 
+                                key='goal', disabled=inputs_disabled)
+            condition = st.text_input("Conditions", placeholder="e.g. Muddy, Hot, Fast...", 
+                                     key='condition', disabled=inputs_disabled)
+            rpe_options = [None] + list(range(1, 11))
+            rpe = st.select_slider("RPE (Perceived Exertion)", options=rpe_options, value=None, 
+                                  format_func=lambda x: "Not Set" if x is None else str(x), 
+                                  key='rpe', disabled=inputs_disabled)
+            
         # Submit Button
-        # Locked whenever processing is active
         if api_key_env:
             st.form_submit_button("Start Analysis", 
                                   type="primary", 
-                                  disabled=st.session_state.is_processing,
+                                  disabled=inputs_disabled,
                                   on_click=start_processing)
         else:
             st.error("API Key missing in environment.")
@@ -207,7 +255,20 @@ with st.container(border=True):
 if st.session_state.is_processing:
     # Need to retrieve values from session state because we might be in a rerun
     uploaded_file = st.session_state.get('fit_file')
-    feedback = st.session_state.get('feedback_text', '')
+    
+    # Retrieve User Context
+    user_intent = {
+        'profile': st.session_state.get('profile'),
+        'goal': st.session_state.get('goal'),
+        'condition': st.session_state.get('condition'),
+        'condition': st.session_state.get('condition')
+    }
+    rpe_val = st.session_state.get('rpe')
+    if rpe_val is not None:
+        user_intent['rpe'] = rpe_val
+    max_hr_val = st.session_state.get('max_hr')
+    if max_hr_val and max_hr_val > 0:
+        user_intent['max_hr'] = max_hr_val
 
     if uploaded_file:
         # Clear previous results immediately
@@ -223,36 +284,30 @@ if st.session_state.is_processing:
             st.session_state.is_processing = False
             st.rerun()
             
-        # > Sanitization
-        safe_feedback = sanitize_input(feedback)
-        
         with st.spinner("Analysis in Progress... Consulting AI Model..."):
             try:
                 # File handling
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".fit") as tmp_file:
+                file_suffix = Path(uploaded_file.name).suffix
+                with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_path = Path(tmp_file.name)
 
                 try:
                     # 1. Parse & Metrics
                     df, metadata = core.parse_fit_file(tmp_path)
-                    metrics = core.calculate_metrics(df, metadata)
+                    metrics = core.calculate_metrics(df, metadata, user_intent=user_intent)
                     metrics['filename'] = uploaded_file.name
+                    if metadata:
+                        metadata['filename'] = uploaded_file.name
                     
                     # 2. AI Report
-                    system_prompt = core.load_system_prompt("analysis.md")
-                    # Smart Downsampling for AI Context
-                    if len(df) > 2000:
-                        step = len(df) // 2000
-                        csv_data_str = df.iloc[::step, :].to_csv(index=False)
-                    else:
-                        csv_data_str = df.to_csv(index=False)
-
-                    report_content = core.generate_ai_report(
-                        [metrics], 
+                    system_prompt = core.load_system_prompt()
+                    
+                    # Generate Report
+                    report_content, json_payload = core.generate_ai_report(
+                        metrics, 
                         system_prompt, 
-                        safe_feedback, 
-                        csv_data=csv_data_str,
+                        user_intent=user_intent,
                         metadata=metadata,
                         api_key=api_key_env
                     )
@@ -273,7 +328,7 @@ if st.session_state.is_processing:
                             'timestamp': time.time(),
                             'metrics': metrics,
                             'report': report_content,
-                            'feedback': safe_feedback
+                            'user_intent': user_intent
                         }
                         core.save_to_firestore('reports', doc_id, firestore_data)
                         # Silent save (User requested removal of toast)
@@ -292,7 +347,9 @@ if st.session_state.is_processing:
                         tmp_path.unlink()
                         
             except Exception as e:
-                st.error(f"Analysis Failed: {e}")
+                import traceback
+                traceback.print_exc()
+                st.session_state.error_message = f"Analysis Failed: {e}"
             finally:
                 # Unlock and reset
                 st.session_state.is_processing = False

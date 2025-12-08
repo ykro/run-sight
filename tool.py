@@ -8,11 +8,15 @@ import json
 import traceback
 from pathlib import Path
 from typing import Dict, Any, List
+from datetime import datetime
 
+import pandas as pd
+import numpy as np
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.panel import Panel
 from rich.markdown import Markdown
+from rich.prompt import Prompt, IntPrompt
 from dotenv import load_dotenv
 
 import utils as core
@@ -20,57 +24,83 @@ import utils as core
 # Load environment variables
 load_dotenv()
 
+# Constants
+GEMINI_MODEL = 'gemini-3-pro-preview'
 CONSOLE = Console()
 
-def save_artifacts(df: Any, metadata: Dict, metrics: Dict, file_path: Path):
-    """Saves intermediate CSV/JSON artifacts."""
-    base_name = file_path.stem
-    parent = file_path.parent
+def get_user_context(args):
+    """
+    Interactively gathers user context if not provided via flags.
+    """
+    context = {}
     
-    # Save CSV
-    csv_path = parent / f"{base_name}.csv"
-    df.to_csv(csv_path, index=False)
+    # Check flags first
+    if args.profile:
+        context['profile'] = args.profile
+    if args.goal:
+        context['goal'] = args.goal
+    if args.condition:
+        context['condition'] = args.condition
+    if args.rpe:
+        context['rpe'] = args.rpe
+    if args.max_hr:
+        context['max_hr'] = args.max_hr
+        
+    # If ignore-context is set, return what we have (or None if empty)
+    if args.ignore_context:
+        return context if context else None
+
+    # Interactive Prompts for missing values
+    CONSOLE.print(Panel("🏃 Runsight Context Awareness", style="cyan"))
     
-    # Save Metadata JSON
-    meta_path = parent / f"{base_name}.json"
-    meta_path.write_text(json.dumps(metadata, indent=2, default=str), encoding='utf-8')
-    
-    # Save Metrics JSON
-    metrics_path = parent / f"{base_name}_metrics.json"
-    metrics_path.write_text(json.dumps(metrics, indent=2, default=str), encoding='utf-8')
+    if 'profile' not in context:
+        context['profile'] = Prompt.ask("Profile", choices=["Elite", "Pro", "Competitive", "Recreational"], default="Recreational")
+
+    if 'goal' not in context:
+        context['goal'] = Prompt.ask("Session Goal", default="Base Building")
+        
+    if 'condition' not in context:
+        context['condition'] = Prompt.ask("Conditions (Terrain/Weather)", default="Normal")
+        
+    if 'rpe' not in context:
+        context['rpe'] = IntPrompt.ask("RPE (1-10)", default=5)
+        
+    return context
 
 def main():
     parser = argparse.ArgumentParser(description="Runsight: Forensic Athletic Analysis")
     parser.add_argument("path", type=Path, help="Path to .fit file or directory")
-    parser.add_argument("-r", "--recursive", action="store_true", help="Process directory recursively")
-    parser.add_argument("-c", "--consolidate", action="store_true", help="Generate consolidated report")
-    parser.add_argument("--feedback", type=str, default="", help="User feedback context")
     
+    # Context Flags
+    parser.add_argument("--profile", help="Athlete Profile (Elite, Competitive, Recreational)")
+    parser.add_argument("--goal", help="Session Goal")
+    parser.add_argument("--condition", help="Environmental/Terrain Conditions")
+    parser.add_argument("--rpe", type=int, help="Rate of Perceived Exertion (1-10)")
+    parser.add_argument("--max-hr", type=int, help="Override Max HR for Zone calculations")
+    parser.add_argument("--ignore-context", action="store_true", help="Skip interactive questions and use defaults")
+    parser.add_argument("--payload-only", action="store_true", help="Generate only the JSON payload, skipping AI analysis")
+
     args = parser.parse_args()
     
     # Load System Prompt
-    try:
-        system_prompt = core.load_system_prompt('analysis.md')
-    except Exception as e:
-        CONSOLE.print(f"[bold red]Error loading prompt:[/bold red] {e}")
-        return
-    
+    system_prompt = core.load_system_prompt()
+
     # Find files
     files_to_process = []
     if args.path.is_file():
         files_to_process = [args.path]
     elif args.path.is_dir():
-        pattern = "**/*.fit" if args.recursive else "*.fit"
-        files_to_process = list(args.path.glob(pattern))
+        # Implicitly recursive for directories
+        for ext in ['fit', 'zip']:
+            pattern = f"**/*.{ext}"
+            files_to_process.extend(list(args.path.glob(pattern)))
     
     if not files_to_process:
-        CONSOLE.print("[yellow]No .fit files found.[/yellow]")
+        CONSOLE.print("[yellow]No .fit/.zip files found.[/yellow]")
         return
 
-    all_metrics = []
-    
-    csv_context = None
-    meta_context = None
+    # Context 
+    user_intent = get_user_context(args)
 
     with Progress(
         SpinnerColumn(),
@@ -83,73 +113,55 @@ def main():
         for file_path in files_to_process:
             try:
                 # Phase A: Parse
+                CONSOLE.print(f"[dim]Parsing {file_path.name}...[/dim]")
                 df, metadata = core.parse_fit_file(file_path)
                 
                 # Phase B: Metrics
-                metrics = core.calculate_metrics(df, metadata)
-                metrics['filename'] = file_path.name
+                CONSOLE.print("[dim]Calculating metrics...[/dim]")
+                metrics = core.calculate_metrics(df, metadata, user_intent=user_intent)
                 
-                # Capture Context (Smart Downsampling for AI)
-                # If df is too large (>2000 rows), we sample it to save tokens while keeping trends.
-                if len(df) > 2000:
-                    step = len(df) // 2000
-                    csv_context = df.iloc[::step, :].to_csv(index=False)
+                # Phase C: Report/Payload
+                # Logic from main.py: Generate payload (and possibly AI report if enabled later)
+                if not args.payload_only:
+                    CONSOLE.print("[dim]Generating AI Report (Sending Request)...[/dim]")
                 else:
-                    csv_context = df.to_csv(index=False)
+                    CONSOLE.print("[dim]Generating Payload (Skipping AI)...[/dim]")
 
-                meta_context = metadata
+                ai_report, json_payload = core.generate_ai_report(
+                    metrics, 
+                    system_prompt=system_prompt, 
+                    user_intent=user_intent, 
+                    metadata=metadata,
+                    skip_ai=args.payload_only
+                )
+                if not args.payload_only:
+                    CONSOLE.print("[dim]Request Completed.[/dim]")
+                
+                # Phase D: Save to Dedicated Folder
+                output_dir = file_path.parent / file_path.stem
+                # Note: save_session_artifacts expects ai_report_text as string. If skipped, ai_report is None.
+                # We should handle this or pass a placeholder. 
+                # Let's pass empty string or handled in util? 
+                # The util writes text. None.write_text will fail.
+                # Updating logic to safeguard against None report.
+                core.save_session_artifacts(output_dir, file_path.stem, df, metrics, ai_report or "", json_payload)
 
-                # Save Artifacts
-                save_artifacts(df, metadata, metrics, file_path)
+                # Print Result
+                if args.payload_only:
+                     CONSOLE.print(Panel(f"Payload saved to: [bold]{output_dir}[/bold]\n\nPayload Preview:\n" + json_payload[:500] + "...", title=f"Payload Generated: {file_path.name}", border_style="green", expand=False))
+                elif ai_report and ai_report.strip().startswith("{"):
+                    # Fallback (AI Failed/Disabled)
+                    CONSOLE.print(Panel(f"Artifacts saved to: [bold]{output_dir}[/bold]\n\nPayload Preview:\n" + ai_report[:500] + "...", title=f"Processed: {file_path.name}", border_style="green", expand=False))
+                else:
+                     # It's an AI Report
+                    CONSOLE.print(Panel(Markdown(ai_report), title=f"Runsight Analysis: {file_path.name}", border_style="blue", expand=False))
+                    CONSOLE.print(f"[dim]Artifacts saved to: {output_dir}[/dim]")
                 
-                # Cloud Upload (GCS) - REMOVED per user request
-                # gcs_uri = core.upload_to_gcs(file_path)
-                # if gcs_uri:
-                #    metrics['gcs_uri'] = gcs_uri
-                
-                all_metrics.append(metrics)
                 progress.advance(task)
                 
             except Exception as e:
-                CONSOLE.print(f"[red]Error processing {file_path.name}: {type(e).__name__}: {e}[/red]")
-                CONSOLE.print(traceback.format_exc())
-
-    if not all_metrics:
-        CONSOLE.print("[red]No metrics generated.[/red]")
-        return
-
-    # Phase C: AI Report
-    try:
-        report = core.generate_ai_report(
-            all_metrics, 
-            system_prompt, 
-            args.feedback, 
-            csv_data=csv_context,
-            metadata=meta_context,
-            consolidate=args.consolidate
-        )
-        
-        if not report:
-            raise ValueError("AI Report generation returned empty content.")
-            
-        CONSOLE.print(Panel(Markdown(report), title="Forensic Report", border_style="green"))
-        
-        # Save Report to MD
-        if args.consolidate:
-            report_path = Path("consolidated_report.md")
-            report_path.write_text(report, encoding='utf-8')
-            CONSOLE.print(f"[green]Report saved to {report_path}[/green]")
-        elif len(files_to_process) == 1:
-            report_path = files_to_process[0].with_name(f"{files_to_process[0].stem}_report.md")
-            report_path.write_text(report, encoding='utf-8')
-            CONSOLE.print(f"[green]Report saved to {report_path}[/green]")
-            
-        # Cloud Save (Firestore) - REMOVED per user request
-
-
-    except Exception as e:
-        CONSOLE.print(f"[bold red]AI Reporting Failed:[/bold red] {type(e).__name__}: {e}")
-        CONSOLE.print(traceback.format_exc())
+                CONSOLE.print(f"[red]Error processing {file_path.name}: {e}[/red]")
+                # CONSOLE.print(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
