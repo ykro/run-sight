@@ -8,7 +8,7 @@ Runsight is a high-performance Python CLI tool designed to perform deep forensic
 
 ## Web App Demo
 You can try the hosted version here:
-[Runsight Web App](https://runsight-web-504954692234.us-central1.run.app/)
+[Runsight Web App](https://runsight-web-622959071640.us-central1.run.app/)
 
 ![Runsight UI](assets/runsight-demo.png)
 
